@@ -34,6 +34,7 @@ module "cloudfront" {
   website_bucket_id              = module.s3.bucket_id
   website_bucket_regional_domain = module.s3.bucket_regional_domain
   logs_bucket_id                 = module.s3.logs_bucket_id
+  website_prefix                 = var.website_prefix
   index_document                 = var.index_document
   error_document                 = var.error_document
   price_class                    = var.price_class

@@ -1,6 +1,7 @@
 locals {
-  origin_id  = "${var.project}-${var.environment}-s3-origin"
-  use_custom = var.custom_domain != "" && var.acm_certificate_arn != ""
+  origin_id   = "${var.project}-${var.environment}-s3-origin"
+  use_custom  = var.custom_domain != "" && var.acm_certificate_arn != ""
+  origin_path = var.website_prefix != "" ? "/${var.website_prefix}" : ""
 }
 
 # ─── Origin Access Control ────────────────────────────────────────────────────
@@ -46,6 +47,9 @@ resource "aws_cloudfront_distribution" "website" {
     domain_name              = var.website_bucket_regional_domain
     origin_id                = local.origin_id
     origin_access_control_id = aws_cloudfront_origin_access_control.website.id
+    # origin_path scopes CloudFront to a specific prefix in the bucket,
+    # so each project's distribution sees its prefix as the site root.
+    origin_path = local.origin_path
   }
 
   default_cache_behavior {

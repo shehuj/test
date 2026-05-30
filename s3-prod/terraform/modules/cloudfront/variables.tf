@@ -28,6 +28,12 @@ variable "logs_bucket_id" {
   type        = string
 }
 
+variable "website_prefix" {
+  description = "S3 key prefix for this project (e.g. 'project-a'). Set as CloudFront origin_path so the distribution serves from bucket/prefix/ as its root."
+  type        = string
+  default     = ""
+}
+
 variable "index_document" {
   description = "Default root object served from CloudFront"
   type        = string

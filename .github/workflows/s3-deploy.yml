@@ -17,6 +17,11 @@ on:
         default: "plan"
         type: choice
         options: [plan, apply, destroy]
+      prefix:
+        description: "S3 key prefix for this project (e.g. 'project-a'). Files land at s3://bucket/prefix/ and CloudFront serves from /prefix/ as its root. Overrides the S3_WEBSITE_PREFIX secret."
+        required: false
+        type: string
+        default: ""
 
 env:
   TF_VERSION: "1.9.0"
@@ -168,6 +173,7 @@ jobs:
           TF_VAR_project: ${{ secrets.S3_PROJECT_NAME }}
           TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
           TF_VAR_environment: ${{ secrets.ENVIRONMENT }}
+          TF_VAR_website_prefix: ${{ github.event.inputs.prefix || secrets.S3_WEBSITE_PREFIX }}
         continue-on-error: true
 
       - name: Fail on plan error
@@ -236,6 +242,20 @@ jobs:
           name: tfplan
           path: ${{ env.TF_WORKING_DIR }}
 
+      - name: Resolve site prefix
+        id: prefix
+        # workflow_dispatch input wins; falls back to the S3_WEBSITE_PREFIX secret;
+        # empty string means files are deployed to the bucket root.
+        run: |
+          PREFIX="${{ github.event.inputs.prefix }}"
+          if [ -z "${PREFIX}" ]; then
+            PREFIX="${{ secrets.S3_WEBSITE_PREFIX }}"
+          fi
+          # Strip leading/trailing slashes for consistency
+          PREFIX="${PREFIX#/}"; PREFIX="${PREFIX%/}"
+          echo "value=${PREFIX}" >> "$GITHUB_OUTPUT"
+          echo "Resolved prefix: '${PREFIX}'"
+
       - name: Terraform Apply
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform apply -input=false tfplan
@@ -243,14 +263,52 @@ jobs:
           TF_VAR_project: ${{ secrets.S3_PROJECT_NAME }}
           TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
           TF_VAR_environment: ${{ secrets.ENVIRONMENT }}
+          TF_VAR_website_prefix: ${{ steps.prefix.outputs.value }}
 
-      - name: Deploy website content
+      - name: Sync website content to S3
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          aws s3 sync ../../s3-prod/website/ s3://$(terraform output -raw website_bucket_name) --delete
+          BUCKET=$(terraform output -raw website_bucket_name)
+          PREFIX="${{ steps.prefix.outputs.value }}"
+          DEST="s3://${BUCKET}${PREFIX:+/${PREFIX}}"
+          echo "Syncing s3-prod/website/ → ${DEST}"
+
+          # Static assets — long TTL (fingerprinted filenames from build tools)
+          aws s3 sync ../../s3-prod/website/ "${DEST}" \
+            --delete \
+            --cache-control "max-age=31536000,public,immutable" \
+            --exclude "*.html" \
+            --exclude "*.json" \
+            --exclude "*.txt"
+
+          # HTML / JSON / txt — no cache so updates are visible immediately
+          aws s3 sync ../../s3-prod/website/ "${DEST}" \
+            --delete \
+            --cache-control "max-age=0,no-cache,no-store,must-revalidate" \
+            --exclude "*" \
+            --include "*.html" \
+            --include "*.json" \
+            --include "*.txt"
+
+      - name: Invalidate CloudFront cache
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          DIST_ID=$(terraform output -raw cloudfront_distribution_id)
+          PREFIX="${{ steps.prefix.outputs.value }}"
+          # Invalidate only the prefix path; fall back to /* for root deployments
+          INVAL_PATH="${PREFIX:+/${PREFIX}}/*"
+          INVAL_PATH="${INVAL_PATH:-/*}"
+          echo "Invalidating ${INVAL_PATH} on distribution ${DIST_ID}"
           aws cloudfront create-invalidation \
-            --distribution-id $(terraform output -raw cloudfront_distribution_id) \
-            --paths '/*'
+            --distribution-id "${DIST_ID}" \
+            --paths "${INVAL_PATH}"
+
+      - name: Print website URL
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          BASE=$(terraform output -raw cloudfront_domain_name)
+          PREFIX="${{ steps.prefix.outputs.value }}"
+          echo "Website live at: ${BASE}${PREFIX:+/${PREFIX}}"
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 4. DESTROY — only via explicit workflow_dispatch
@@ -286,6 +344,22 @@ jobs:
             -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
             -input=false
 
+      # S3 buckets with versioning must be emptied before terraform destroy can delete them.
+      - name: Empty website and logs buckets
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          for OUTPUT in website_bucket_name logs_bucket_name; do
+            BUCKET=$(terraform output -raw "${OUTPUT}" 2>/dev/null || true)
+            if [ -n "${BUCKET}" ]; then
+              echo "Emptying s3://${BUCKET} ..."
+              aws s3api delete-objects --bucket "${BUCKET}" \
+                --delete "$(aws s3api list-object-versions --bucket "${BUCKET}" \
+                  --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+                  --output json)" > /dev/null 2>&1 || true
+              aws s3 rm "s3://${BUCKET}" --recursive || true
+            fi
+          done
+
       - name: Terraform Destroy
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform destroy -auto-approve -input=false
@@ -293,3 +367,4 @@ jobs:
           TF_VAR_project: ${{ secrets.S3_PROJECT_NAME }}
           TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
           TF_VAR_environment: ${{ secrets.ENVIRONMENT }}
+          TF_VAR_website_prefix: ${{ github.event.inputs.prefix || secrets.S3_WEBSITE_PREFIX }}

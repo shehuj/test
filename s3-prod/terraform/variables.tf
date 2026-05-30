@@ -29,6 +29,12 @@ variable "owner" {
 
 # ─── S3 ───────────────────────────────────────────────────────────────────────
 
+variable "website_prefix" {
+  description = "S3 key prefix for this project's files (e.g. 'project-a'). CloudFront origin_path is set to /prefix so each prefix acts as an independent site root. Leave empty for root-level deployment."
+  type        = string
+  default     = ""
+}
+
 variable "index_document" {
   description = "Default root object served by the website (e.g. index.html)"
   type        = string
