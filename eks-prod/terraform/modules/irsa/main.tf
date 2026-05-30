@@ -28,9 +28,8 @@ resource "aws_iam_role" "cluster_autoscaler" {
 }
 
 # tfsec:ignore:aws-iam-no-policy-wildcards
-# Read-only Describe/List actions have no resource-level restriction support in IAM.
-# Mutating actions are guarded by a StringEquals tag condition scoped to this cluster.
 resource "aws_iam_policy" "cluster_autoscaler" {
+  #checkov:skip=CKV_AWS_355:Describe/List autoscaling+EC2 actions have no resource-level restriction support per AWS IAM docs; mutating actions are tag-condition restricted to this cluster's ASGs only
   name = "${var.cluster_name}-cluster-autoscaler"
 
   policy = jsonencode({
@@ -100,6 +99,8 @@ resource "aws_iam_role" "alb_controller" {
 }
 
 resource "aws_iam_policy" "alb_controller" {
+  #checkov:skip=CKV_AWS_355:This is the AWS-documented ALB controller policy; EC2/ELB Describe actions have no resource-level restriction support, and write actions are tag-condition constrained
+  #checkov:skip=CKV_AWS_290:ALB controller write actions (CreateSecurityGroup, CreateLoadBalancer, etc.) are constrained by aws:RequestTag and aws:ResourceTag conditions — not open wildcards
   name = "${var.cluster_name}-alb-controller"
 
   policy = jsonencode({

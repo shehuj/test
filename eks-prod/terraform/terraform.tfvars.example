@@ -28,8 +28,8 @@ app_node_desired        = 3
 
 node_volume_size = 50
 
-cluster_log_retention_days = 90
-flow_log_retention_days    = 90
+cluster_log_retention_days = 365  # minimum 365 — enforced by variable validation
+flow_log_retention_days    = 365  # minimum 365 — enforced by variable validation
 
 # Leave empty to disable SSH access to nodes entirely (recommended).
 allowed_ssh_cidrs = []

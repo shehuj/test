@@ -126,15 +126,25 @@ variable "node_volume_size" {
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
 variable "cluster_log_retention_days" {
-  description = "CloudWatch log retention for cluster control-plane logs"
+  description = "CloudWatch log retention for cluster control-plane logs (minimum 365 for CKV_AWS_338)"
   type        = number
-  default     = 90
+  default     = 365
+
+  validation {
+    condition     = var.cluster_log_retention_days >= 365
+    error_message = "cluster_log_retention_days must be at least 365 days to meet compliance requirements."
+  }
 }
 
 variable "flow_log_retention_days" {
-  description = "CloudWatch log retention for VPC flow logs"
+  description = "CloudWatch log retention for VPC flow logs (minimum 365 for CKV_AWS_338)"
   type        = number
-  default     = 90
+  default     = 365
+
+  validation {
+    condition     = var.flow_log_retention_days >= 365
+    error_message = "flow_log_retention_days must be at least 365 days to meet compliance requirements."
+  }
 }
 
 # ─── Allowed CIDRs for node-group SSH (leave empty to disable) ───────────────

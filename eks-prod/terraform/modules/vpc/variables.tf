@@ -19,8 +19,14 @@ variable "public_subnet_cidrs" {
 }
 
 variable "flow_log_retention_days" {
-  description = "CloudWatch log retention in days for VPC flow logs"
+  description = "CloudWatch log retention in days for VPC flow logs (minimum 365)"
   type        = number
+  default     = 365
+
+  validation {
+    condition     = var.flow_log_retention_days >= 365
+    error_message = "flow_log_retention_days must be at least 365 days."
+  }
 }
 
 variable "cloudwatch_kms_key_arn" {

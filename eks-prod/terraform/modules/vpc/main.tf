@@ -19,6 +19,14 @@ resource "aws_vpc" "main" {
   }
 }
 
+# ─── Lock down the default security group ────────────────────────────────────
+# AWS creates a default SG with allow-all rules; override it with no rules at all.
+
+resource "aws_default_security_group" "default" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.cluster_name}-default-sg-locked" }
+}
+
 # ─── Subnets ──────────────────────────────────────────────────────────────────
 
 resource "aws_subnet" "private" {
