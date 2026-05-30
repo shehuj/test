@@ -1,0 +1,5 @@
+# AWS-0104: Unrestricted egress on cluster and node security groups.
+# INTENTIONAL: EKS nodes must reach ECR, AWS APIs, and the internet to pull images.
+# Egress is through NAT Gateways (per-AZ); nodes have no public IP addresses.
+# Risk accepted and documented. Review if VPC Endpoints are added in future.
+AWS-0104
