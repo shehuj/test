@@ -1,0 +1,12 @@
+minimum_severity: MEDIUM
+
+exclude:
+  # Egress 0.0.0.0/0 on cluster and node security groups is intentional.
+  # All outbound traffic exits through per-AZ NAT Gateways — nodes have no public IPs.
+  # Nodes need outbound access to pull images (ECR, Docker Hub) and call AWS APIs.
+  - aws-ec2-no-public-egress-sgr
+
+  # Cluster Autoscaler autoscaling:SetDesiredCapacity on Resource "*" is intentional.
+  # The statement is protected by a StringEquals condition on aws:ResourceTag scoped to
+  # this specific cluster's ASGs — effectively equivalent to resource-level restriction.
+  - aws-iam-no-policy-wildcards

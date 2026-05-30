@@ -1,0 +1,29 @@
+# Local state — never commit
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform plan output
+tfplan
+
+# Sensitive var files — use example file + CI secrets instead
+terraform.tfvars
+*.tfvars
+!*.tfvars.example
+
+# Lock file (committed, but generated)
+# .terraform.lock.hcl — keep this committed
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
