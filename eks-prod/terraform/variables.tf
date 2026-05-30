@@ -82,18 +82,21 @@ variable "system_node_instance_types" {
 }
 
 variable "system_node_min" {
-  type    = number
-  default = 2
+  description = "Minimum number of nodes in the system node group"
+  type        = number
+  default     = 2
 }
 
 variable "system_node_max" {
-  type    = number
-  default = 6
+  description = "Maximum number of nodes in the system node group"
+  type        = number
+  default     = 6
 }
 
 variable "system_node_desired" {
-  type    = number
-  default = 2
+  description = "Desired number of nodes in the system node group at launch"
+  type        = number
+  default     = 2
 }
 
 variable "app_node_instance_types" {
@@ -103,18 +106,21 @@ variable "app_node_instance_types" {
 }
 
 variable "app_node_min" {
-  type    = number
-  default = 2
+  description = "Minimum number of nodes in the application node group"
+  type        = number
+  default     = 2
 }
 
 variable "app_node_max" {
-  type    = number
-  default = 20
+  description = "Maximum number of nodes in the application node group"
+  type        = number
+  default     = 20
 }
 
 variable "app_node_desired" {
-  type    = number
-  default = 3
+  description = "Desired number of nodes in the application node group at launch"
+  type        = number
+  default     = 3
 }
 
 variable "node_volume_size" {
