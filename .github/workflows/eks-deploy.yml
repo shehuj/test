@@ -178,12 +178,13 @@ jobs:
       - name: Terraform Plan
         id: plan
         working-directory: ${{ env.TF_WORKING_DIR }}
-        # set +e prevents bash from exiting before we capture $? on terraform error.
+        # terraform.tfvars is gitignored (local use only).
+        # All variables are passed via TF_VAR_ env vars; remaining vars use defaults.
+        # set +e prevents bash from exiting before we capture $?.
         # exit code 0 = no changes, 1 = error, 2 = changes present.
         run: |
           set +e
           terraform plan \
-            -var-file=terraform.tfvars \
             -out=tfplan \
             -detailed-exitcode \
             -input=false
@@ -192,6 +193,7 @@ jobs:
           exit $EXIT_CODE
         env:
           TF_VAR_cluster_name: ${{ secrets.EKS_CLUSTER_NAME }}
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
         continue-on-error: true
 
       - name: Fail on plan error
@@ -263,6 +265,9 @@ jobs:
       - name: Terraform Apply
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform apply -input=false tfplan
+        env:
+          TF_VAR_cluster_name: ${{ secrets.EKS_CLUSTER_NAME }}
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
 
       - name: Post apply — print kubeconfig command
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -304,4 +309,7 @@ jobs:
 
       - name: Terraform Destroy
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform destroy -var-file=terraform.tfvars -auto-approve -input=false
+        run: terraform destroy -auto-approve -input=false
+        env:
+          TF_VAR_cluster_name: ${{ secrets.EKS_CLUSTER_NAME }}
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
