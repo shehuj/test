@@ -1,0 +1,295 @@
+name: S3 Prod — Security Scan & Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "s3-prod/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "s3-prod/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to run"
+        required: true
+        default: "plan"
+        type: choice
+        options: [plan, apply, destroy]
+
+env:
+  TF_VERSION: "1.9.0"
+  TF_WORKING_DIR: s3-prod/terraform
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 1. SECURITY SCANS — all must pass before any Terraform runs
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  tfsec:
+    name: tfsec (IaC static analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tfsec
+        run: |
+          curl -sLo /usr/local/bin/tfsec \
+            https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64
+          chmod +x /usr/local/bin/tfsec
+
+      - name: Run tfsec
+        run: |
+          tfsec ${{ env.TF_WORKING_DIR }} \
+            --minimum-severity MEDIUM \
+            --format sarif \
+            --out tfsec.sarif
+
+      - name: Upload tfsec SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: tfsec.sarif
+
+  checkov:
+    name: checkov (policy as code)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ${{ env.TF_WORKING_DIR }}
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov.sarif
+          soft_fail: false
+          quiet: true
+
+      - name: Upload checkov SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: checkov.sarif
+
+  trivy:
+    name: trivy (vulnerability + IaC scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Run trivy IaC scan
+        run: |
+          trivy config ${{ env.TF_WORKING_DIR }} \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --format sarif \
+            --output trivy.sarif \
+            --exit-code 1
+
+      - name: Upload trivy SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. TERRAFORM VALIDATE & PLAN
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: [tfsec, checkov, trivy]
+
+    outputs:
+      plan_exit_code: ${{ steps.plan.outputs.exit_code }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -input=false
+
+      - name: Terraform Format check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        # terraform.tfvars is gitignored (local use only).
+        # All variables are passed via TF_VAR_ env vars; remaining vars use defaults.
+        # set +e prevents bash from exiting before we capture $?.
+        # exit code 0 = no changes, 1 = error, 2 = changes present.
+        run: |
+          set +e
+          terraform plan \
+            -out=tfplan \
+            -detailed-exitcode \
+            -input=false
+          EXIT_CODE=$?
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+        env:
+          TF_VAR_project: ${{ secrets.S3_PROJECT_NAME }}
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+          TF_VAR_environment: ${{ secrets.ENVIRONMENT }}
+        continue-on-error: true
+
+      - name: Fail on plan error
+        if: steps.plan.outputs.exit_code == '1'
+        run: |
+          echo "::error::Terraform plan failed — check the output above for details."
+          exit 1
+
+      # Only upload when plan succeeded (exit 0 = no diff, 2 = changes).
+      # Skipping on exit 1 prevents apply from running against a missing artifact.
+      - name: Upload plan artifact
+        if: steps.plan.outputs.exit_code == '0' || steps.plan.outputs.exit_code == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          retention-days: 5
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. TERRAFORM APPLY — requires manual approval via "production" environment
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    # needs.terraform-plan.result == 'success' is required explicitly — without it,
+    # GitHub Actions runs the job when the if expression is true regardless of
+    # whether the needed job failed, causing the artifact-not-found error.
+    if: |
+      needs.terraform-plan.result == 'success' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'))
+
+    # "production" environment requires approval from a designated reviewer
+    # Configure this under repo Settings → Environments → production
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -input=false
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -input=false tfplan
+        env:
+          TF_VAR_project: ${{ secrets.S3_PROJECT_NAME }}
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+          TF_VAR_environment: ${{ secrets.ENVIRONMENT }}
+
+      - name: Deploy website content
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          aws s3 sync ../../s3-prod/website/ s3://$(terraform output -raw website_bucket_name) --delete
+          aws cloudfront create-invalidation \
+            --distribution-id $(terraform output -raw cloudfront_distribution_id) \
+            --paths '/*'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4. DESTROY — only via explicit workflow_dispatch
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  terraform-destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -input=false
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform destroy -auto-approve -input=false
+        env:
+          TF_VAR_project: ${{ secrets.S3_PROJECT_NAME }}
+          TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+          TF_VAR_environment: ${{ secrets.ENVIRONMENT }}

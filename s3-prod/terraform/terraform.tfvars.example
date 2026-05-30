@@ -1,0 +1,19 @@
+aws_region  = "us-east-1"
+environment = "prod"
+project     = "my-website"
+owner       = "platform-team"
+
+index_document      = "index.html"
+error_document      = "error.html"
+logs_retention_days = 90
+
+# CloudFront
+price_class = "PriceClass_100"  # NA + Europe edge locations
+
+# Custom domain — leave empty to use the CloudFront default *.cloudfront.net domain.
+# When set, acm_certificate_arn must also be provided (certificate must be in us-east-1).
+custom_domain       = ""
+acm_certificate_arn = ""
+
+# Block specific countries (ISO 3166-1-alpha-2). Empty = allow all.
+geo_restriction_locations = []
