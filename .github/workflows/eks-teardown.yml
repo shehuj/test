@@ -89,6 +89,81 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform validate
 
+      # ── Pre-destroy: remove Kubernetes-provisioned AWS resources ─────────────
+      # Services of type LoadBalancer and the AWS Load Balancer Controller create
+      # ELBs/ALBs/NLBs, target groups, security groups, and ENIs OUTSIDE Terraform
+      # state. These hold references to the VPC/subnets and make `terraform destroy`
+      # fail. The cluster API endpoint is private, so kubectl can't reach it from
+      # the runner — we clean these orphaned resources directly via the AWS API.
+      - name: Clean up orphaned load balancers and ENIs
+        env:
+          CLUSTER: ${{ secrets.EKS_CLUSTER_NAME }}
+          REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+
+          VPC_ID=$(aws ec2 describe-vpcs --region "${REGION}" \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=shared,owned" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+
+          if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "None" ]; then
+            echo "No VPC found for cluster '${CLUSTER}' — nothing to clean up."
+            exit 0
+          fi
+          echo "Cluster VPC: ${VPC_ID}"
+
+          # 1. Delete ALBs / NLBs (elbv2) in the VPC
+          for ARN in $(aws elbv2 describe-load-balancers --region "${REGION}" \
+              --query "LoadBalancers[?VpcId=='${VPC_ID}'].LoadBalancerArn" \
+              --output text 2>/dev/null || true); do
+            echo "Deleting load balancer ${ARN}"
+            aws elbv2 delete-load-balancer --region "${REGION}" --load-balancer-arn "${ARN}" || true
+          done
+
+          # 2. Delete classic ELBs in the VPC
+          for NAME in $(aws elb describe-load-balancers --region "${REGION}" \
+              --query "LoadBalancerDescriptions[?VPCId=='${VPC_ID}'].LoadBalancerName" \
+              --output text 2>/dev/null || true); do
+            echo "Deleting classic ELB ${NAME}"
+            aws elb delete-load-balancer --region "${REGION}" --load-balancer-name "${NAME}" || true
+          done
+
+          # 3. Wait for load balancers to fully detach (they hold ENIs)
+          echo "Waiting for load balancers to drain from the VPC ..."
+          for i in $(seq 1 30); do
+            REMAINING=$(aws elbv2 describe-load-balancers --region "${REGION}" \
+              --query "length(LoadBalancers[?VpcId=='${VPC_ID}'])" --output text 2>/dev/null || echo 0)
+            [ "${REMAINING}" = "0" ] && { echo "All elbv2 load balancers gone."; break; }
+            echo "  ${REMAINING} load balancer(s) still present — waiting ..."
+            sleep 10
+          done
+
+          # 4. Delete leftover target groups in the VPC
+          for TG in $(aws elbv2 describe-target-groups --region "${REGION}" \
+              --query "TargetGroups[?VpcId=='${VPC_ID}'].TargetGroupArn" \
+              --output text 2>/dev/null || true); do
+            echo "Deleting target group ${TG}"
+            aws elbv2 delete-target-group --region "${REGION}" --target-group-arn "${TG}" || true
+          done
+
+          # 5. Delete security groups created by the LB controller (tagged)
+          for SG in $(aws ec2 describe-security-groups --region "${REGION}" \
+              --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag-key,Values=elbv2.k8s.aws/cluster" \
+              --query 'SecurityGroups[].GroupId' --output text 2>/dev/null || true); do
+            echo "Deleting LB-controller security group ${SG}"
+            aws ec2 delete-security-group --region "${REGION}" --group-id "${SG}" || true
+          done
+
+          # 6. Delete any leftover detached (available) ENIs in the VPC
+          for ENI in $(aws ec2 describe-network-interfaces --region "${REGION}" \
+              --filters "Name=vpc-id,Values=${VPC_ID}" "Name=status,Values=available" \
+              --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null || true); do
+            echo "Deleting detached ENI ${ENI}"
+            aws ec2 delete-network-interface --region "${REGION}" --network-interface-id "${ENI}" || true
+          done
+
+          echo "Orphaned resource cleanup complete."
+
       - name: Terraform Destroy
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform destroy -auto-approve -input=false
@@ -195,31 +270,20 @@ jobs:
       - name: IAM — Find the GitHub Actions OIDC provider ARN
         id: find-oidc
         run: |
-          OIDC_ARN=$(aws iam list-open-id-connect-providers \
-            --query "OpenIDConnectProviderList[?ends_with(Arn,'token.actions.githubusercontent.com')].Arn" \
-            --output text 2>/dev/null || true)
+          # The GitHub OIDC provider ARN is deterministic:
+          #   arn:<partition>:iam::<account>:oidc-provider/token.actions.githubusercontent.com
+          CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
+          PARTITION=$(echo "${CALLER_ARN}" | cut -d: -f2)
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          OIDC_ARN="arn:${PARTITION}:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
 
-          # Fallback: inspect each provider's URL
-          if [ -z "${OIDC_ARN}" ] || [ "${OIDC_ARN}" = "None" ]; then
-            OIDC_ARN=$(aws iam list-open-id-connect-providers --output json | \
-              python3 -c "
-import sys, json, subprocess
-for p in json.load(sys.stdin).get('OpenIDConnectProviderList', []):
-    arn = p['Arn']
-    out = subprocess.run(['aws','iam','get-open-id-connect-provider',
-                          '--open-id-connect-provider-arn', arn],
-                         capture_output=True, text=True).stdout
-    if 'token.actions.githubusercontent.com' in json.loads(out).get('Url',''):
-        print(arn); break
-" 2>/dev/null || true)
-          fi
-
-          if [ -z "${OIDC_ARN}" ] || [ "${OIDC_ARN}" = "None" ]; then
-            echo "No GitHub OIDC provider found — already removed or never created."
-            echo "oidc_arn=" >> "$GITHUB_OUTPUT"
-          else
+          # Only flag it for deletion if it actually exists.
+          if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${OIDC_ARN}" >/dev/null 2>&1; then
             echo "Found: ${OIDC_ARN}"
             echo "oidc_arn=${OIDC_ARN}" >> "$GITHUB_OUTPUT"
+          else
+            echo "No GitHub OIDC provider found — already removed or never created."
+            echo "oidc_arn=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: IAM — Delete the GitHub Actions OIDC provider
