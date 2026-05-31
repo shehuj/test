@@ -58,6 +58,8 @@ jobs:
         if: always()
         with:
           sarif_file: tfsec.sarif
+          category: tfsec-eks
+          checkout_path: ${{ github.workspace }}
 
   checkov:
     name: checkov (policy as code)
@@ -85,6 +87,8 @@ jobs:
         if: always()
         with:
           sarif_file: checkov.sarif
+          category: checkov-eks
+          checkout_path: ${{ github.workspace }}
 
   trivy:
     name: trivy (vulnerability + IaC scan)
@@ -111,6 +115,8 @@ jobs:
         if: always()
         with:
           sarif_file: trivy.sarif
+          category: trivy-eks
+          checkout_path: ${{ github.workspace }}
 
   tflint:
     name: tflint (Terraform linting)
