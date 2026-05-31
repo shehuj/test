@@ -16,9 +16,19 @@ variable "environment" {
 }
 
 variable "project" {
-  description = "Project name — used to name all resources"
+  description = "Project name — used as the S3 bucket name prefix. Must be lowercase, 3-36 chars, start and end with a letter or number, hyphens allowed (e.g. my-website)."
   type        = string
   default     = "my-website"
+
+  validation {
+    condition     = length(var.project) >= 3 && length(var.project) <= 36
+    error_message = "project must be between 3 and 36 characters (bucket name = project + environment + suffix, total max 63)."
+  }
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]*[a-z0-9]$", var.project))
+    error_message = "project must be lowercase alphanumeric with hyphens, and must start and end with a letter or number — S3 bucket names have the same constraint. Set the S3_PROJECT_NAME GitHub secret."
+  }
 }
 
 variable "owner" {
