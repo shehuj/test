@@ -91,13 +91,47 @@ jobs:
           TF_VAR_environment: ${{ secrets.ENVIRONMENT }}
           TF_VAR_website_prefix: ${{ secrets.S3_WEBSITE_PREFIX }}
 
+      # ── Read Terraform outputs once, safely ──────────────────────────────────
+      # `terraform output -json` returns {} (not a warning) when state has no
+      # outputs, so warning text can never leak into a bucket name. Values are
+      # validated and exported to $GITHUB_ENV for all later steps to consume.
+      - name: Read Terraform outputs
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          OUTPUTS=$(terraform output -json 2>/dev/null || echo '{}')
+
+          extract() {
+            echo "${OUTPUTS}" | python3 -c "import sys,json; print((json.load(sys.stdin).get('$1') or {}).get('value',''))" 2>/dev/null || true
+          }
+
+          WEBSITE_BUCKET=$(extract website_bucket_name)
+          LOGS_BUCKET=$(extract logs_bucket_name)
+          CF_DIST_ID=$(extract cloudfront_distribution_id)
+
+          # Only accept values that match the valid S3 bucket / CF id shape;
+          # anything else (empty, warning text, whitespace) is treated as absent.
+          valid_bucket() { echo "$1" | grep -qE '^[a-z0-9][a-z0-9.-]{1,253}[a-z0-9]$'; }
+          valid_id()     { echo "$1" | grep -qE '^[A-Z0-9]{1,30}$'; }
+
+          valid_bucket "${WEBSITE_BUCKET}" || WEBSITE_BUCKET=""
+          valid_bucket "${LOGS_BUCKET}"    || LOGS_BUCKET=""
+          valid_id     "${CF_DIST_ID}"     || CF_DIST_ID=""
+
+          echo "WEBSITE_BUCKET=${WEBSITE_BUCKET}" >> "$GITHUB_ENV"
+          echo "LOGS_BUCKET=${LOGS_BUCKET}"       >> "$GITHUB_ENV"
+          echo "CF_DIST_ID=${CF_DIST_ID}"         >> "$GITHUB_ENV"
+
+          echo "Resolved outputs:"
+          echo "  website bucket : '${WEBSITE_BUCKET}'"
+          echo "  logs bucket    : '${LOGS_BUCKET}'"
+          echo "  cloudfront id  : '${CF_DIST_ID}'"
+
       # ── Drain website bucket ─────────────────────────────────────────────────
 
       - name: Website bucket — suspend versioning
-        working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          BUCKET=$(terraform output -raw website_bucket_name 2>/dev/null || true)
-          if [ -z "${BUCKET}" ]; then echo "No website bucket output — skipping."; exit 0; fi
+          BUCKET="${WEBSITE_BUCKET}"
+          if [ -z "${BUCKET}" ]; then echo "No website bucket — skipping."; exit 0; fi
           echo "Suspending versioning on s3://${BUCKET} ..."
           aws s3api put-bucket-versioning \
             --bucket "${BUCKET}" \
@@ -107,7 +141,7 @@ jobs:
       - name: Website bucket — delete all object versions
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          BUCKET=$(terraform output -raw website_bucket_name 2>/dev/null || true)
+          BUCKET="${WEBSITE_BUCKET}"
           [ -z "${BUCKET}" ] && exit 0
           REGION="${{ secrets.AWS_REGION }}"
           while true; do
@@ -127,7 +161,7 @@ jobs:
       - name: Website bucket — delete all delete markers
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          BUCKET=$(terraform output -raw website_bucket_name 2>/dev/null || true)
+          BUCKET="${WEBSITE_BUCKET}"
           [ -z "${BUCKET}" ] && exit 0
           REGION="${{ secrets.AWS_REGION }}"
           while true; do
@@ -147,10 +181,9 @@ jobs:
       # ── Drain access logs bucket ─────────────────────────────────────────────
 
       - name: Logs bucket — suspend versioning
-        working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          BUCKET=$(terraform output -raw logs_bucket_name 2>/dev/null || true)
-          if [ -z "${BUCKET}" ]; then echo "No logs bucket output — skipping."; exit 0; fi
+          BUCKET="${LOGS_BUCKET}"
+          if [ -z "${BUCKET}" ]; then echo "No logs bucket — skipping."; exit 0; fi
           echo "Suspending versioning on s3://${BUCKET} ..."
           aws s3api put-bucket-versioning \
             --bucket "${BUCKET}" \
@@ -160,7 +193,7 @@ jobs:
       - name: Logs bucket — delete all object versions
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          BUCKET=$(terraform output -raw logs_bucket_name 2>/dev/null || true)
+          BUCKET="${LOGS_BUCKET}"
           [ -z "${BUCKET}" ] && exit 0
           REGION="${{ secrets.AWS_REGION }}"
           while true; do
@@ -180,7 +213,7 @@ jobs:
       - name: Logs bucket — delete all delete markers
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          BUCKET=$(terraform output -raw logs_bucket_name 2>/dev/null || true)
+          BUCKET="${LOGS_BUCKET}"
           [ -z "${BUCKET}" ] && exit 0
           REGION="${{ secrets.AWS_REGION }}"
           while true; do
@@ -201,10 +234,9 @@ jobs:
       # Terraform destroy will fail if the distribution is still Enabled.
 
       - name: CloudFront — disable distribution
-        working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          DIST_ID=$(terraform output -raw cloudfront_distribution_id 2>/dev/null || true)
-          if [ -z "${DIST_ID}" ]; then echo "No CloudFront distribution output — skipping."; exit 0; fi
+          DIST_ID="${CF_DIST_ID}"
+          if [ -z "${DIST_ID}" ]; then echo "No CloudFront distribution — skipping."; exit 0; fi
 
           echo "Disabling CloudFront distribution ${DIST_ID} ..."
 
