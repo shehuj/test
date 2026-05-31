@@ -7,6 +7,11 @@ on:
         description: "Type exactly 'yes-delete-all' to confirm full teardown of the EKS production cluster and all associated resources. THIS IS IRREVERSIBLE."
         required: true
         type: string
+      delete_oidc_provider:
+        description: "Also delete the ACCOUNT-WIDE GitHub OIDC provider. WARNING: this breaks OIDC auth for EVERY repo/workflow in this AWS account (including eks-deploy). Only enable when decommissioning the whole account."
+        required: false
+        type: boolean
+        default: false
 
 env:
   TF_VERSION: "1.9.0"
@@ -166,10 +171,26 @@ jobs:
 
       - name: Terraform Destroy
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform destroy -auto-approve -input=false
         env:
           TF_VAR_cluster_name: ${{ secrets.EKS_CLUSTER_NAME }}
           TF_VAR_aws_region: ${{ secrets.AWS_REGION }}
+        run: |
+          # Retry destroy — VPC/subnet/SG deletion can fail on the first pass
+          # while ENIs from just-deleted load balancers finish detaching
+          # (DependencyViolation). Each retry waits for AWS to settle.
+          for attempt in 1 2 3; do
+            echo "=== Terraform destroy attempt ${attempt}/3 ==="
+            if terraform destroy -auto-approve -input=false; then
+              echo "Destroy succeeded on attempt ${attempt}."
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "Attempt ${attempt} failed — waiting 60s for AWS resources to settle ..."
+              sleep 60
+            fi
+          done
+          echo "::error::terraform destroy failed after 3 attempts."
+          exit 1
 
   # ─────────────────────────────────────────────────────────────────────────────
   # POST-DESTROY CLEANUP — removes bootstrap resources Terraform does NOT manage:
@@ -269,6 +290,7 @@ jobs:
 
       - name: IAM — Find the GitHub Actions OIDC provider ARN
         id: find-oidc
+        if: ${{ github.event.inputs.delete_oidc_provider == 'true' }}
         run: |
           # The GitHub OIDC provider ARN is deterministic:
           #   arn:<partition>:iam::<account>:oidc-provider/token.actions.githubusercontent.com
@@ -287,7 +309,7 @@ jobs:
           fi
 
       - name: IAM — Delete the GitHub Actions OIDC provider
-        if: steps.find-oidc.outputs.oidc_arn != ''
+        if: ${{ github.event.inputs.delete_oidc_provider == 'true' && steps.find-oidc.outputs.oidc_arn != '' }}
         run: |
           aws iam delete-open-id-connect-provider \
             --open-id-connect-provider-arn "${{ steps.find-oidc.outputs.oidc_arn }}"
@@ -332,5 +354,5 @@ jobs:
           echo "  Resources removed post-destroy:"
           echo "    S3 state bucket  : s3://${{ secrets.TF_STATE_BUCKET }}"
           echo "    DynamoDB table   : ${{ secrets.TF_LOCK_TABLE }}"
-          echo "    IAM OIDC provider: token.actions.githubusercontent.com"
+          echo "    IAM OIDC provider: ${{ github.event.inputs.delete_oidc_provider == 'true' && 'DELETED (token.actions.githubusercontent.com)' || 'kept (delete_oidc_provider was false)' }}"
           echo "============================================================"
