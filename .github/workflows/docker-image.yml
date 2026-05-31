@@ -17,4 +17,4 @@ jobs:
     - name: Build the Docker image
       run: |
         mv Containers/Dockerfile-test Containers/Dockerfile
-        docker build ./Containers --file Dockerfile-test --tag my-image-name:$(date +%s)
+        docker build ./Containers --file Dockerfile --tag my-image-name:$(date +%s)
