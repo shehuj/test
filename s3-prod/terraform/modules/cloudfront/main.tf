@@ -1,13 +1,15 @@
 locals {
-  origin_id   = "${var.project}-${var.environment}-s3-origin"
-  use_custom  = var.custom_domain != "" && var.acm_certificate_arn != ""
-  # null omits the attribute entirely — CloudFront rejects an empty string for originPath.
-  origin_path = var.website_prefix != "" ? "/${var.website_prefix}" : null
+  origin_id  = "${var.project}-${var.environment}-s3-origin"
+  use_custom = var.custom_domain != "" && var.acm_certificate_arn != ""
+
+  # CloudFront origin_path is not supported with S3 OAC origins.
+  # Instead, embed the prefix into default_root_object and error response paths
+  # so CloudFront routes to the right S3 objects without an origin path.
+  # Files live at s3://bucket/prefix/file and are served at cf-domain/prefix/file.
+  prefix_slash = var.website_prefix != "" ? "${var.website_prefix}/" : ""
 }
 
 # ─── Origin Access Control ────────────────────────────────────────────────────
-# OAC is the modern successor to OAI — it signs requests with SigV4,
-# works with SSE-KMS, and supports all S3 operations.
 
 resource "aws_cloudfront_origin_access_control" "website" {
   name                              = "${var.project}-${var.environment}-oac"
@@ -17,7 +19,7 @@ resource "aws_cloudfront_origin_access_control" "website" {
   signing_protocol                  = "sigv4"
 }
 
-# ─── Managed cache and request policies ──────────────────────────────────────
+# ─── Managed policies ─────────────────────────────────────────────────────────
 
 data "aws_cloudfront_cache_policy" "caching_optimized" {
   name = "Managed-CachingOptimized"
@@ -37,20 +39,23 @@ resource "aws_cloudfront_distribution" "website" {
   #checkov:skip=CKV_AWS_310:Single S3 origin is appropriate for a static website; S3 provides 99.99% availability SLA
   #checkov:skip=CKV_AWS_374:Geo restriction is controlled via var.geo_restriction_locations; no restriction is a valid default
   #checkov:skip=CKV_AWS_174:TLS 1.2 enforcement requires a custom domain + ACM certificate; set custom_domain and acm_certificate_arn to enable
-  enabled             = true
-  is_ipv6_enabled     = true
-  default_root_object = var.index_document
-  price_class         = var.price_class
-  comment             = "${var.project}-${var.environment} website"
-  aliases             = local.use_custom ? [var.custom_domain] : []
+  enabled         = true
+  is_ipv6_enabled = true
+  price_class     = var.price_class
+  comment         = "${var.project}-${var.environment} website"
+  aliases         = local.use_custom ? [var.custom_domain] : []
+
+  # default_root_object must NOT start with /. When a prefix is set it becomes
+  # "prefix/index.html" so https://cf-domain/ returns s3://bucket/prefix/index.html.
+  default_root_object = "${local.prefix_slash}${var.index_document}"
 
   origin {
     domain_name              = var.website_bucket_regional_domain
     origin_id                = local.origin_id
     origin_access_control_id = aws_cloudfront_origin_access_control.website.id
-    # origin_path scopes CloudFront to a specific prefix in the bucket,
-    # so each project's distribution sees its prefix as the site root.
-    origin_path = local.origin_path
+    # origin_path is intentionally omitted — the CloudFront API rejects it for
+    # S3 origins that use OAC. Prefix routing is handled via default_root_object
+    # and custom_error_response paths instead.
   }
 
   default_cache_behavior {
@@ -64,18 +69,19 @@ resource "aws_cloudfront_distribution" "website" {
     response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
   }
 
-  # SPA support: serve index.html for unknown paths instead of an S3 403/404
+  # SPA support: on 403/404, serve the prefix-aware index so client-side routing works.
+  # response_page_path MUST start with /.
   custom_error_response {
     error_code            = 403
     response_code         = 200
-    response_page_path    = "/${var.index_document}"
+    response_page_path    = "/${local.prefix_slash}${var.index_document}"
     error_caching_min_ttl = 10
   }
 
   custom_error_response {
     error_code            = 404
     response_code         = 404
-    response_page_path    = "/${var.error_document}"
+    response_page_path    = "/${local.prefix_slash}${var.error_document}"
     error_caching_min_ttl = 10
   }
 
@@ -103,8 +109,6 @@ resource "aws_cloudfront_distribution" "website" {
 }
 
 # ─── S3 bucket policy — grant CloudFront OAC access ──────────────────────────
-# The policy lives here (not in the s3 module) because it needs the
-# distribution ARN, which is only known after CloudFront is created.
 
 data "aws_iam_policy_document" "cf_oac_access" {
   statement {
