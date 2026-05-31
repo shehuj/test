@@ -15,11 +15,10 @@ terraform {
   # Remote state — create the bucket and DynamoDB table before init.
   # See README for bootstrap instructions.
   backend "s3" {
-    bucket         = "REPLACE_WITH_YOUR_STATE_BUCKET"
+    bucket         = "bathbucket31"
     key            = "eks-prod/terraform.tfstate"
     region         = "us-east-1"
-    dynamodb_table = "terraform-state-lock"
+    dynamodb_table = "dyning_table"
     encrypt        = true
-    kms_key_id     = "alias/terraform-state"
   }
 }
