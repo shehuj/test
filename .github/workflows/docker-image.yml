@@ -3,8 +3,12 @@ name: Docker Image CI
 on:
   push:
     branches: ["main"]
+    paths:
+      - "Containers/**"
   pull_request:
     branches: ["main"]
+    paths:
+      - "Containers/**"
 
 permissions:
   contents: read
