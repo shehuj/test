@@ -193,13 +193,12 @@ jobs:
           exit 1
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # POST-DESTROY CLEANUP — removes bootstrap resources Terraform does NOT manage:
-  #   - S3 state bucket   (drain all versions + delete markers, then delete bucket)
-  #   - DynamoDB lock table
-  #   - GitHub Actions OIDC provider from AWS IAM
+  # POST-DESTROY CLEANUP — removes the GitHub Actions OIDC provider (opt-in only).
+  # NOTE: the S3 state bucket and DynamoDB lock table are intentionally PRESERVED
+  # so the Terraform backend remains intact for future use.
   # ─────────────────────────────────────────────────────────────────────────────
   post-destroy-cleanup:
-    name: Post-Destroy Cleanup — S3, DynamoDB, OIDC Provider
+    name: Post-Destroy Cleanup — OIDC Provider (opt-in)
     runs-on: ubuntu-latest
     needs: terraform-destroy
 
@@ -210,81 +209,6 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
           role-session-name: eks-prod-teardown-post-cleanup
-
-      # ── S3 State Bucket ──────────────────────────────────────────────────────
-
-      - name: S3 — Suspend versioning (stop new versions during drain)
-        run: |
-          aws s3api put-bucket-versioning \
-            --bucket "${{ secrets.TF_STATE_BUCKET }}" \
-            --versioning-configuration Status=Suspended \
-            --region "${{ secrets.AWS_REGION }}" || true
-
-      - name: S3 — Delete all object versions
-        run: |
-          BUCKET="${{ secrets.TF_STATE_BUCKET }}"
-          REGION="${{ secrets.AWS_REGION }}"
-
-          while true; do
-            VERSIONS=$(aws s3api list-object-versions \
-              --bucket "${BUCKET}" --region "${REGION}" \
-              --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
-              --output json 2>/dev/null)
-
-            COUNT=$(echo "${VERSIONS}" | python3 -c \
-              "import sys,json; d=json.load(sys.stdin); print(len(d.get('Objects') or []))")
-
-            [ "${COUNT}" -eq 0 ] && { echo "No more versions."; break; }
-
-            echo "Deleting batch of ${COUNT} versions ..."
-            aws s3api delete-objects \
-              --bucket "${BUCKET}" --region "${REGION}" \
-              --delete "${VERSIONS}" > /dev/null
-          done
-
-      - name: S3 — Delete all delete markers
-        run: |
-          BUCKET="${{ secrets.TF_STATE_BUCKET }}"
-          REGION="${{ secrets.AWS_REGION }}"
-
-          while true; do
-            MARKERS=$(aws s3api list-object-versions \
-              --bucket "${BUCKET}" --region "${REGION}" \
-              --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
-              --output json 2>/dev/null)
-
-            COUNT=$(echo "${MARKERS}" | python3 -c \
-              "import sys,json; d=json.load(sys.stdin); print(len(d.get('Objects') or []))")
-
-            [ "${COUNT}" -eq 0 ] && { echo "No more delete markers."; break; }
-
-            echo "Deleting batch of ${COUNT} delete markers ..."
-            aws s3api delete-objects \
-              --bucket "${BUCKET}" --region "${REGION}" \
-              --delete "${MARKERS}" > /dev/null
-          done
-
-      - name: S3 — Delete the state bucket
-        run: |
-          aws s3api delete-bucket \
-            --bucket "${{ secrets.TF_STATE_BUCKET }}" \
-            --region "${{ secrets.AWS_REGION }}"
-          echo "Bucket s3://${{ secrets.TF_STATE_BUCKET }} deleted."
-
-      # ── DynamoDB Lock Table ──────────────────────────────────────────────────
-
-      - name: DynamoDB — Delete the Terraform lock table
-        run: |
-          TABLE="${{ secrets.TF_LOCK_TABLE }}"
-          REGION="${{ secrets.AWS_REGION }}"
-
-          aws dynamodb delete-table \
-            --table-name "${TABLE}" --region "${REGION}"
-
-          aws dynamodb wait table-not-exists \
-            --table-name "${TABLE}" --region "${REGION}"
-
-          echo "DynamoDB table '${TABLE}' deleted."
 
       # ── GitHub Actions OIDC Provider ─────────────────────────────────────────
 
@@ -351,8 +275,10 @@ jobs:
           echo "    CloudWatch log groups (control-plane + VPC flow logs)"
           echo "    Launch templates"
           echo ""
-          echo "  Resources removed post-destroy:"
+          echo "  Backend resources PRESERVED (not deleted):"
           echo "    S3 state bucket  : s3://${{ secrets.TF_STATE_BUCKET }}"
           echo "    DynamoDB table   : ${{ secrets.TF_LOCK_TABLE }}"
+          echo ""
+          echo "  Other cleanup:"
           echo "    IAM OIDC provider: ${{ github.event.inputs.delete_oidc_provider == 'true' && 'DELETED (token.actions.githubusercontent.com)' || 'kept (delete_oidc_provider was false)' }}"
           echo "============================================================"
