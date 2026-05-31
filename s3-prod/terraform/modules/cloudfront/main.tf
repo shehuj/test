@@ -1,7 +1,8 @@
 locals {
   origin_id   = "${var.project}-${var.environment}-s3-origin"
   use_custom  = var.custom_domain != "" && var.acm_certificate_arn != ""
-  origin_path = var.website_prefix != "" ? "/${var.website_prefix}" : ""
+  # null omits the attribute entirely — CloudFront rejects an empty string for originPath.
+  origin_path = var.website_prefix != "" ? "/${var.website_prefix}" : null
 }
 
 # ─── Origin Access Control ────────────────────────────────────────────────────
