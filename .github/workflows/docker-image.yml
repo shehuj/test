@@ -4,11 +4,11 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "Containers/**"
+      - "docker-images/**"
   pull_request:
     branches: ["main"]
     paths:
-      - "Containers/**"
+      - "docker-images/**"
 
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v3
         with:
-          context: ./Containers
-          file: Containers/Dockerfile
+          context: ./docker-images
+          file: docker-images/Dockerfile
           push: ${{ github.event_name == 'push' }}
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/my-image-name:latest
